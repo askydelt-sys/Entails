@@ -1,3 +1,5 @@
+import BlackHoleGame from "@/components/BlackHoleGame";
+
 export default function Home() {
-  return <main className="min-h-screen bg-neutral-900" />;
+  return <BlackHoleGame />;
 }
