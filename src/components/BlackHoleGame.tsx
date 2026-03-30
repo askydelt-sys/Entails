@@ -2,10 +2,21 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 
-const SQUIRREL_COUNT = 30;
-const ABSORB_THRESHOLD = 25;
-const GRAVITY_RADIUS = 180;
-const ABSORB_RADIUS = 28;
+// Per-level difficulty config
+function getLevelConfig(level: number) {
+  return {
+    squirrelCount: 20 + level * 8,
+    absorbThreshold: 15 + level * 7,
+    gravityRadius: Math.max(100, 180 - level * 12),
+    absorbRadius: Math.max(14, 28 - level * 2),
+    squirrelSpeed: 0.6 + level * 0.25,
+    // squirrels flee the cursor above level 2
+    fleeRadius: level >= 2 ? Math.max(0, 60 + level * 15) : 0,
+    fleeForce: level >= 2 ? 0.18 + level * 0.06 : 0,
+    // acretion tint shifts per level
+    diskHue: [36, 180, 280, 0, 120][Math.min(level - 1, 4)],
+  };
+}
 
 interface Squirrel {
   id: number;
@@ -39,7 +50,7 @@ interface Particle {
   color: string;
 }
 
-type Phase = "playing" | "forming" | "blackhole";
+type Phase = "playing" | "forming" | "blackhole" | "void" | "transition";
 
 function randomBetween(a: number, b: number) {
   return a + Math.random() * (b - a);
@@ -60,22 +71,32 @@ export default function BlackHoleGame() {
     hawkingParticles: [] as Particle[],
     accretionAngle: 0,
     vortexPulse: 0,
+    // void dive
+    voidProgress: 0,        // 0→1 while holding on black hole
+    voidHoldTime: 0,        // frames spent holding on BH
+    voidWhirl: 0,           // rotation for void tunnel
+    transitionAlpha: 0,     // fade-to-black for level transition
+    // level
+    level: 1,
   });
   const rafRef = useRef<number>(0);
   const [phase, setPhase] = useState<Phase>("playing");
   const [absorbedCount, setAbsorbedCount] = useState(0);
+  const [level, setLevel] = useState(1);
+  const [voidProgress, setVoidProgress] = useState(0);
 
-  const spawnSquirrels = useCallback((w: number, h: number) => {
+  const spawnSquirrels = useCallback((w: number, h: number, lvl: number) => {
+    const cfg = getLevelConfig(lvl);
     const squirrels: Squirrel[] = [];
-    for (let i = 0; i < SQUIRREL_COUNT; i++) {
+    for (let i = 0; i < cfg.squirrelCount; i++) {
       squirrels.push({
         id: i,
         x: randomBetween(40, w - 40),
         y: randomBetween(40, h - 40),
-        vx: randomBetween(-1.2, 1.2),
-        vy: randomBetween(-1.2, 1.2),
+        vx: randomBetween(-cfg.squirrelSpeed, cfg.squirrelSpeed),
+        vy: randomBetween(-cfg.squirrelSpeed, cfg.squirrelSpeed),
         angle: Math.random() * Math.PI * 2,
-        speed: randomBetween(0.6, 1.4),
+        speed: randomBetween(cfg.squirrelSpeed * 0.7, cfg.squirrelSpeed * 1.4),
         absorbed: false,
         absorbProgress: 0,
         scale: 1,
@@ -105,8 +126,7 @@ export default function BlackHoleGame() {
       const angle = Math.random() * Math.PI * 2;
       const speed = randomBetween(1, 4);
       stateRef.current.particles.push({
-        x,
-        y,
+        x, y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         life: 1,
@@ -127,7 +147,7 @@ export default function BlackHoleGame() {
       canvas.height = window.innerHeight;
       spawnStars(canvas.width, canvas.height);
       if (stateRef.current.squirrels.length === 0) {
-        spawnSquirrels(canvas.width, canvas.height);
+        spawnSquirrels(canvas.width, canvas.height, stateRef.current.level);
       }
     };
     resize();
@@ -172,11 +192,44 @@ export default function BlackHoleGame() {
       const h = canvas.height;
       const cx = w / 2;
       const cy = h / 2;
+      const cfg = getLevelConfig(s.level);
+
+      // ── TRANSITION FADE ──────────────────────────────────────────
+      if (s.phase === "transition") {
+        s.transitionAlpha = Math.min(1, s.transitionAlpha + 0.025 * dt);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, w, h);
+        ctx.globalAlpha = s.transitionAlpha;
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, w, h);
+        ctx.globalAlpha = 1;
+        if (s.transitionAlpha >= 1) {
+          // Reset for next level
+          s.absorbedCount = 0;
+          s.blackHoleRadius = 0;
+          s.blackHoleAge = 0;
+          s.voidProgress = 0;
+          s.voidHoldTime = 0;
+          s.voidWhirl = 0;
+          s.transitionAlpha = 0;
+          s.particles = [];
+          s.hawkingParticles = [];
+          s.phase = "playing";
+          setPhase("playing");
+          setAbsorbedCount(0);
+          setVoidProgress(0);
+          setLevel(s.level);
+          spawnSquirrels(w, h, s.level);
+          spawnStars(w, h);
+        }
+        rafRef.current = requestAnimationFrame(loop);
+        return;
+      }
 
       ctx.fillStyle = "#050508";
       ctx.fillRect(0, 0, w, h);
 
-      // Stars
+      // ── STARS ────────────────────────────────────────────────────
       const t = time / 1000;
       for (const star of s.stars) {
         const tw = 0.5 + 0.5 * Math.sin(t * star.twinkleSpeed + star.twinkleOffset);
@@ -188,32 +241,30 @@ export default function BlackHoleGame() {
       }
       ctx.globalAlpha = 1;
 
+      // ── PLAYING ──────────────────────────────────────────────────
       if (s.phase === "playing" || s.phase === "forming") {
-        // Gravity well
         if (s.pointerActive && s.pointer) {
           s.vortexPulse += 0.08 * dt;
           const pulse = 1 + 0.12 * Math.sin(s.vortexPulse);
           const grd = ctx.createRadialGradient(
             s.pointer.x, s.pointer.y, 0,
-            s.pointer.x, s.pointer.y, GRAVITY_RADIUS * pulse
+            s.pointer.x, s.pointer.y, cfg.gravityRadius * pulse
           );
           grd.addColorStop(0, "rgba(168,85,247,0.35)");
           grd.addColorStop(0.4, "rgba(124,58,237,0.15)");
           grd.addColorStop(1, "rgba(0,0,0,0)");
           ctx.fillStyle = grd;
           ctx.beginPath();
-          ctx.arc(s.pointer.x, s.pointer.y, GRAVITY_RADIUS * pulse, 0, Math.PI * 2);
+          ctx.arc(s.pointer.x, s.pointer.y, cfg.gravityRadius * pulse, 0, Math.PI * 2);
           ctx.fill();
 
-          // Vortex ring
           ctx.strokeStyle = `rgba(168,85,247,${0.3 + 0.2 * Math.sin(s.vortexPulse)})`;
           ctx.lineWidth = 1.5;
           ctx.beginPath();
-          ctx.arc(s.pointer.x, s.pointer.y, ABSORB_RADIUS * 1.5, 0, Math.PI * 2);
+          ctx.arc(s.pointer.x, s.pointer.y, cfg.absorbRadius * 1.5, 0, Math.PI * 2);
           ctx.stroke();
         }
 
-        // Update squirrels
         for (const sq of s.squirrels) {
           if (sq.absorbed) continue;
 
@@ -222,7 +273,12 @@ export default function BlackHoleGame() {
             const dy = s.pointer.y - sq.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
 
-            if (dist < ABSORB_RADIUS) {
+            // Flee mechanic (level 2+)
+            if (cfg.fleeRadius > 0 && dist < cfg.fleeRadius) {
+              const flee = (1 - dist / cfg.fleeRadius) * cfg.fleeForce;
+              sq.vx -= (dx / dist) * flee * dt;
+              sq.vy -= (dy / dist) * flee * dt;
+            } else if (dist < cfg.absorbRadius) {
               sq.absorbProgress += 0.08 * dt;
               sq.scale = 1 - sq.absorbProgress;
               if (sq.absorbProgress >= 1) {
@@ -230,7 +286,7 @@ export default function BlackHoleGame() {
                 s.absorbedCount++;
                 spawnAbsorbParticles(sq.x, sq.y);
                 setAbsorbedCount(s.absorbedCount);
-                if (s.absorbedCount >= ABSORB_THRESHOLD && s.phase === "playing") {
+                if (s.absorbedCount >= cfg.absorbThreshold && s.phase === "playing") {
                   s.phase = "forming";
                   setPhase("forming");
                   setTimeout(() => {
@@ -239,8 +295,8 @@ export default function BlackHoleGame() {
                   }, 1500);
                 }
               }
-            } else if (dist < GRAVITY_RADIUS) {
-              const force = (1 - dist / GRAVITY_RADIUS) * 0.5;
+            } else if (dist < cfg.gravityRadius) {
+              const force = (1 - dist / cfg.gravityRadius) * 0.5;
               sq.vx += (dx / dist) * force * dt;
               sq.vy += (dy / dist) * force * dt;
             }
@@ -251,24 +307,21 @@ export default function BlackHoleGame() {
           sq.vx += Math.cos(sq.angle) * 0.03 * dt;
           sq.vy += Math.sin(sq.angle) * 0.03 * dt;
 
-          // Speed limit
           const spd = Math.sqrt(sq.vx * sq.vx + sq.vy * sq.vy);
-          if (spd > sq.speed * 2) {
-            sq.vx = (sq.vx / spd) * sq.speed * 2;
-            sq.vy = (sq.vy / spd) * sq.speed * 2;
+          if (spd > sq.speed * 2.5) {
+            sq.vx = (sq.vx / spd) * sq.speed * 2.5;
+            sq.vy = (sq.vy / spd) * sq.speed * 2.5;
           }
 
           sq.x += sq.vx * dt;
           sq.y += sq.vy * dt;
 
-          // Bounce
           if (sq.x < 20) { sq.x = 20; sq.vx = Math.abs(sq.vx); }
           if (sq.x > w - 20) { sq.x = w - 20; sq.vx = -Math.abs(sq.vx); }
           if (sq.y < 20) { sq.y = 20; sq.vy = Math.abs(sq.vy); }
           if (sq.y > h - 20) { sq.y = h - 20; sq.vy = -Math.abs(sq.vy); }
         }
 
-        // Draw squirrels
         ctx.font = "22px serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -282,7 +335,7 @@ export default function BlackHoleGame() {
         }
       }
 
-      // Particles
+      // ── PARTICLES ────────────────────────────────────────────────
       s.particles = s.particles.filter(p => p.life > 0);
       for (const p of s.particles) {
         p.x += p.vx * dt;
@@ -298,16 +351,18 @@ export default function BlackHoleGame() {
       }
       ctx.globalAlpha = 1;
 
-      // Black hole phase
-      if (s.phase === "forming" || s.phase === "blackhole") {
-        s.blackHoleRadius += (s.phase === "forming" ? 2 : 0.4) * dt;
-        s.blackHoleRadius = Math.min(s.blackHoleRadius, 120);
+      // ── BLACK HOLE ───────────────────────────────────────────────
+      if (s.phase === "forming" || s.phase === "blackhole" || s.phase === "void") {
+        if (s.phase !== "void") {
+          s.blackHoleRadius += (s.phase === "forming" ? 2 : 0.4) * dt;
+          s.blackHoleRadius = Math.min(s.blackHoleRadius, 120);
+        }
         s.blackHoleAge += dt;
         s.accretionAngle += 0.02 * dt;
 
         const bhr = s.blackHoleRadius;
 
-        // Suck remaining squirrels in
+        // Suck remaining squirrels
         for (const sq of s.squirrels) {
           if (sq.absorbed) continue;
           const dx = cx - sq.x;
@@ -325,7 +380,7 @@ export default function BlackHoleGame() {
         }
 
         // Hawking radiation
-        if (s.phase === "blackhole" && Math.random() < 0.3) {
+        if ((s.phase === "blackhole" || s.phase === "void") && Math.random() < 0.3) {
           const angle = Math.random() * Math.PI * 2;
           const r = bhr + randomBetween(2, 8);
           s.hawkingParticles.push({
@@ -335,7 +390,7 @@ export default function BlackHoleGame() {
             vy: Math.sin(angle) * randomBetween(0.5, 2),
             life: 1,
             maxLife: 1,
-            color: `hsl(${Math.random() * 60 + 200}, 100%, 70%)`,
+            color: `hsl(${cfg.diskHue + Math.random() * 60}, 100%, 70%)`,
           });
         }
 
@@ -362,12 +417,9 @@ export default function BlackHoleGame() {
         ctx.arc(cx, cy, bhr * 3.5, 0, Math.PI * 2);
         ctx.fill();
 
-        // Accretion disk rings
-        const diskColors = [
-          "rgba(251,191,36,0.25)",
-          "rgba(245,158,11,0.18)",
-          "rgba(234,88,12,0.12)",
-        ];
+        // Accretion disk
+        const h1 = cfg.diskHue;
+        const diskOpacities = [0.28, 0.18, 0.12];
         for (let ring = 0; ring < 3; ring++) {
           const rx = bhr * (1.8 + ring * 0.6);
           const ry = bhr * (0.35 + ring * 0.1);
@@ -376,24 +428,57 @@ export default function BlackHoleGame() {
           ctx.rotate(s.accretionAngle + ring * 0.4);
           ctx.beginPath();
           ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
-          ctx.strokeStyle = diskColors[ring];
+          ctx.strokeStyle = `hsla(${h1 + ring * 15},90%,60%,${diskOpacities[ring]})`;
           ctx.lineWidth = 3 - ring;
           ctx.stroke();
           ctx.restore();
         }
 
         // Photon ring
+        const photonGrd = ctx.createRadialGradient(cx, cy, bhr * 1.0, cx, cy, bhr * 1.35);
+        photonGrd.addColorStop(0, `hsla(${h1},100%,75%,0)`);
+        photonGrd.addColorStop(0.5, `hsla(${h1},100%,75%,0.55)`);
+        photonGrd.addColorStop(1, `hsla(${h1},100%,75%,0)`);
         ctx.beginPath();
         ctx.arc(cx, cy, bhr * 1.18, 0, Math.PI * 2);
-        const photonGrd = ctx.createRadialGradient(cx, cy, bhr * 1.0, cx, cy, bhr * 1.35);
-        photonGrd.addColorStop(0, "rgba(253,224,71,0.0)");
-        photonGrd.addColorStop(0.5, "rgba(253,224,71,0.55)");
-        photonGrd.addColorStop(1, "rgba(253,224,71,0.0)");
         ctx.strokeStyle = photonGrd;
         ctx.lineWidth = 4;
         ctx.stroke();
 
-        // Event horizon
+        // ── VOID DIVE progress ────────────────────────────────────
+        if (s.phase === "void") {
+          s.voidWhirl += 0.07 * dt;
+          // Warp tunnel rings expanding outward
+          const rings = 8;
+          for (let i = 0; i < rings; i++) {
+            const frac = ((s.voidProgress * rings + i) % rings) / rings;
+            const r = frac * Math.max(w, h) * 0.8;
+            const alpha = (1 - frac) * 0.18 * s.voidProgress;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(s.voidWhirl + i * 0.4);
+            ctx.beginPath();
+            ctx.ellipse(0, 0, r, r * 0.4, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = `hsla(${270 + i * 15},100%,70%,${alpha})`;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // Central suck — zoom stars toward center
+          for (const star of s.stars) {
+            const dx = star.x - cx;
+            const dy = star.y - cy;
+            star.x -= dx * 0.03 * s.voidProgress * dt;
+            star.y -= dy * 0.03 * s.voidProgress * dt;
+          }
+
+          // Darken overlay proportional to void progress
+          ctx.fillStyle = `rgba(0,0,0,${s.voidProgress * 0.6})`;
+          ctx.fillRect(0, 0, w, h);
+        }
+
+        // Event horizon (drawn after void overlay so it stays crisp)
         const ehGrd = ctx.createRadialGradient(cx, cy, 0, cx, cy, bhr);
         ehGrd.addColorStop(0, "#000000");
         ehGrd.addColorStop(0.85, "#000000");
@@ -403,7 +488,6 @@ export default function BlackHoleGame() {
         ctx.arc(cx, cy, bhr, 0, Math.PI * 2);
         ctx.fill();
 
-        // Draw remaining squirrels on top of black hole bg
         if (s.phase === "forming") {
           ctx.font = "22px serif";
           ctx.textAlign = "center";
@@ -414,6 +498,38 @@ export default function BlackHoleGame() {
             ctx.translate(sq.x, sq.y);
             ctx.fillText("🐿️", 0, 0);
             ctx.restore();
+          }
+        }
+
+        // ── Detect hold on black hole ─────────────────────────────
+        if (s.phase === "blackhole" && s.pointerActive && s.pointer) {
+          const dx = s.pointer.x - cx;
+          const dy = s.pointer.y - cy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < bhr * 1.5) {
+            s.voidHoldTime += dt;
+            const HOLD_NEEDED = 80; // frames (~1.3s)
+            s.voidProgress = Math.min(s.voidHoldTime / HOLD_NEEDED, 1);
+            setVoidProgress(s.voidProgress);
+            if (s.voidProgress >= 1) {
+              s.phase = "void";
+              setPhase("void");
+            }
+          } else {
+            s.voidHoldTime = Math.max(0, s.voidHoldTime - dt * 2);
+            s.voidProgress = s.voidHoldTime / 80;
+            setVoidProgress(s.voidProgress);
+          }
+        }
+
+        // ── Complete void dive → trigger transition ────────────────
+        if (s.phase === "void") {
+          s.voidProgress = Math.min(s.voidProgress + 0.005 * dt, 1);
+          setVoidProgress(s.voidProgress);
+          if (s.voidProgress >= 1 && s.transitionAlpha === 0) {
+            s.level += 1;
+            s.phase = "transition";
+            setPhase("transition");
           }
         }
       }
@@ -435,33 +551,38 @@ export default function BlackHoleGame() {
     };
   }, [spawnSquirrels, spawnStars]);
 
+  const cfg = getLevelConfig(level);
+
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black select-none touch-none">
       <canvas ref={canvasRef} className="absolute inset-0" />
 
       {/* HUD */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none">
-        <div className="text-white/80 text-sm font-mono tracking-widest uppercase">
-          Squirrel Singularity
+        <div className="text-white/60 text-xs font-mono tracking-widest uppercase">
+          Squirrel Singularity · <span className="text-purple-400">Level {level}</span>
         </div>
-        {phase === "playing" && (
+        {(phase === "playing") && (
           <>
-            <div className="flex items-center gap-2">
-              <span className="text-purple-300 text-xs font-mono">{absorbedCount} / {ABSORB_THRESHOLD} squirrels</span>
+            <div className="text-purple-300 text-xs font-mono">
+              {absorbedCount} / {cfg.absorbThreshold} squirrels
             </div>
             <div className="w-48 h-1.5 bg-white/10 rounded-full overflow-hidden">
               <div
                 className="h-full bg-purple-500 rounded-full transition-all duration-300"
-                style={{ width: `${Math.min((absorbedCount / ABSORB_THRESHOLD) * 100, 100)}%` }}
+                style={{ width: `${Math.min((absorbedCount / cfg.absorbThreshold) * 100, 100)}%` }}
               />
             </div>
           </>
         )}
       </div>
 
+      {/* Bottom hints */}
       {phase === "playing" && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-white/40 text-xs font-mono text-center pointer-events-none">
-          Press &amp; hold to create a gravity well · Absorb {ABSORB_THRESHOLD} squirrels
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-white/30 text-xs font-mono text-center pointer-events-none">
+          {level >= 2
+            ? `Hold to pull · squirrels flee above level 2 · absorb ${cfg.absorbThreshold}`
+            : `Press & hold to create a gravity well · absorb ${cfg.absorbThreshold} squirrels`}
         </div>
       )}
 
@@ -476,7 +597,30 @@ export default function BlackHoleGame() {
           <div className="text-yellow-300/90 text-sm font-mono tracking-widest animate-pulse">
             ✦ BLACK HOLE ACHIEVED ✦
           </div>
-          <div className="text-white/40 text-xs font-mono">Hawking radiation detected</div>
+          <div className="text-white/40 text-xs font-mono">Hold the black hole to enter the void</div>
+          {/* hold ring */}
+          {voidProgress > 0 && (
+            <div className="w-32 h-1 bg-white/10 rounded-full overflow-hidden mt-1">
+              <div
+                className="h-full bg-purple-400 rounded-full transition-all duration-100"
+                style={{ width: `${voidProgress * 100}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {phase === "void" && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-purple-200/70 text-sm font-mono text-center pointer-events-none animate-pulse">
+          Entering the void…
+        </div>
+      )}
+
+      {phase === "transition" && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="text-white/80 text-xl font-mono tracking-widest animate-pulse">
+            LEVEL {level + 1}
+          </div>
         </div>
       )}
     </div>
