@@ -49,6 +49,14 @@ interface Particle {
   color: string;
 }
 
+interface ScorePopup {
+  x: number;
+  y: number;
+  text: string;
+  life: number;
+  maxLife: number;
+}
+
 type Phase = "playing" | "collapsing" | "blackhole" | "transition";
 
 function randomBetween(a: number, b: number) {
@@ -75,11 +83,19 @@ export default function BlackHoleGame() {
     collapseCenterX: 0,
     collapseCenterY: 0,
     emissionTimer: 0,
+    score: 0,
+    combo: 0,
+    lastCatchTime: 0,
+    highScore: 0,
+    scorePopups: [] as ScorePopup[],
   });
   const rafRef = useRef<number>(0);
   const [phase, setPhase] = useState<Phase>("playing");
   const [level, setLevel] = useState(1);
   const [inWellCount, setInWellCount] = useState(0);
+  const [score, setScore] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [highScore, setHighScore] = useState(0);
 
   const spawnSquirrels = useCallback(
     (w: number, h: number, lvl: number, existing?: Squirrel[]) => {
@@ -156,6 +172,27 @@ export default function BlackHoleGame() {
     }
   };
 
+  const spawnScorePopup = (x: number, y: number, text: string) => {
+    stateRef.current.scorePopups.push({
+      x: x + randomBetween(-20, 20),
+      y,
+      text,
+      life: 1,
+      maxLife: 1,
+    });
+  };
+
+  const saveHighScore = () => {
+    const s = stateRef.current;
+    if (s.score > s.highScore) {
+      s.highScore = s.score;
+      setHighScore(s.score);
+      try {
+        localStorage.setItem("squirrel-singularity-high-score", String(s.score));
+      } catch {}
+    }
+  };
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -172,6 +209,14 @@ export default function BlackHoleGame() {
     };
     resize();
     window.addEventListener("resize", resize);
+
+    try {
+      const stored = localStorage.getItem("squirrel-singularity-high-score");
+      if (stored) {
+        stateRef.current.highScore = parseInt(stored, 10) || 0;
+        setHighScore(stateRef.current.highScore);
+      }
+    } catch {}
 
     const getPos = (e: MouseEvent | Touch): { x: number; y: number } => {
       const rect = canvas.getBoundingClientRect();
@@ -252,6 +297,25 @@ export default function BlackHoleGame() {
 
     let lastTime = 0;
 
+    function updateAndRenderPopups(
+      ctx: CanvasRenderingContext2D,
+      s: typeof stateRef.current,
+      dt: number
+    ) {
+      s.scorePopups = s.scorePopups.filter((p) => p.life > 0);
+      for (const p of s.scorePopups) {
+        p.y -= 0.8 * dt;
+        p.life -= 0.02 * dt;
+        const alpha = Math.max(0, p.life / p.maxLife);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.text.includes("x") ? "#f59e0b" : "#a855f7";
+        ctx.font = "bold 18px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(p.text, p.x, p.y);
+      }
+      ctx.globalAlpha = 1;
+    }
+
     const loop = (time: number) => {
       const dt = Math.min((time - lastTime) / 16, 3);
       lastTime = time;
@@ -325,6 +389,14 @@ export default function BlackHoleGame() {
           s.squirrels = s.squirrels.filter((sq) => !sq.inWell);
           s.collapseProgress = 0;
           setInWellCount(0);
+
+          const bonus = 500 * s.level;
+          s.score += bonus;
+          s.combo = 0;
+          setScore(s.score);
+          setCombo(0);
+          saveHighScore();
+          spawnScorePopup(s.collapseCenterX, s.collapseCenterY - 30, `+${bonus} BLACK HOLE!`);
           for (let i = 0; i < 40; i++) {
             const pa = Math.random() * Math.PI * 2;
             const ps = randomBetween(1, 5);
@@ -371,6 +443,8 @@ export default function BlackHoleGame() {
         ctx.arc(tcx, tcy, 100 * glowIntensity, 0, Math.PI * 2);
         ctx.fill();
 
+        updateAndRenderPopups(ctx, s, dt);
+
         rafRef.current = requestAnimationFrame(loop);
         return;
       }
@@ -399,6 +473,7 @@ export default function BlackHoleGame() {
           spawnSquirrels(w, h, s.level);
           spawnStars(w, h);
         }
+        updateAndRenderPopups(ctx, s, dt);
         rafRef.current = requestAnimationFrame(loop);
         return;
       }
@@ -444,7 +519,9 @@ export default function BlackHoleGame() {
         }
 
         let currentInWell = 0;
+        const now = performance.now();
         for (const sq of s.squirrels) {
+          const wasInWell = sq.inWell;
           sq.inWell = false;
           if (s.pointerActive && s.pointer) {
             const dx = s.pointer.x - sq.x;
@@ -461,6 +538,25 @@ export default function BlackHoleGame() {
               sq.vy += (dy / dist) * force * dt;
               sq.inWell = true;
               currentInWell++;
+
+              if (!wasInWell) {
+                if (now - s.lastCatchTime < 2000) {
+                  s.combo = s.combo + 1;
+                } else {
+                  s.combo = 1;
+                }
+                s.lastCatchTime = now;
+                const points = 10 * s.combo;
+                s.score += points;
+                setScore(s.score);
+                setCombo(s.combo);
+                saveHighScore();
+                spawnScorePopup(
+                  sq.x,
+                  sq.y,
+                  s.combo > 1 ? `+${points} x${s.combo}` : `+${points}`
+                );
+              }
             }
           }
 
@@ -498,6 +594,11 @@ export default function BlackHoleGame() {
         }
 
         setInWellCount(currentInWell);
+
+        if (s.combo > 0 && now - s.lastCatchTime >= 2000) {
+          s.combo = 0;
+          setCombo(0);
+        }
 
         if (currentInWell >= ENTANGLE_THRESHOLD && s.phase === "playing") {
           s.phase = "collapsing";
@@ -726,6 +827,8 @@ export default function BlackHoleGame() {
         }
       }
 
+      updateAndRenderPopups(ctx, s, dt);
+
       rafRef.current = requestAnimationFrame(loop);
     };
 
@@ -857,6 +960,7 @@ export default function BlackHoleGame() {
     rafRef.current = requestAnimationFrame(loop);
 
     return () => {
+      saveHighScore();
       cancelAnimationFrame(rafRef.current);
       window.removeEventListener("resize", resize);
       canvas.removeEventListener("mousedown", onDown);
@@ -879,6 +983,15 @@ export default function BlackHoleGame() {
         <div className="text-white/60 text-xs font-mono tracking-widest uppercase">
           Squirrel Singularity ·{" "}
           <span className="text-purple-400">Level {level}</span>
+        </div>
+        <div className="flex items-center gap-4 text-sm font-mono">
+          <span className="text-purple-300">{score}</span>
+          {combo > 1 && (
+            <span className="text-yellow-400 animate-pulse">x{combo}</span>
+          )}
+          {highScore > 0 && (
+            <span className="text-white/30 text-xs">HI {highScore}</span>
+          )}
         </div>
         {phase === "playing" && (
           <>
