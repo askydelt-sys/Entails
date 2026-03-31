@@ -57,6 +57,13 @@ interface ScorePopup {
   maxLife: number;
 }
 
+interface TouchPulse {
+  x: number;
+  y: number;
+  age: number;
+  maxAge: number;
+}
+
 type Phase = "playing" | "collapsing" | "blackhole" | "transition";
 
 function randomBetween(a: number, b: number) {
@@ -69,8 +76,10 @@ export default function BlackHoleGame() {
     squirrels: [] as Squirrel[],
     stars: [] as Star[],
     particles: [] as Particle[],
+    touchPulses: [] as TouchPulse[],
     pointer: null as { x: number; y: number } | null,
     pointerActive: false,
+    isTouch: false,
     phase: "playing" as Phase,
     blackHoleRadius: 0,
     blackHoleAge: 0,
@@ -200,8 +209,14 @@ export default function BlackHoleGame() {
     if (!ctx) return;
 
     const resize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      const parent = canvas.parentElement;
+      if (parent) {
+        canvas.width = parent.clientWidth;
+        canvas.height = parent.clientHeight;
+      } else {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      }
       spawnStars(canvas.width, canvas.height);
       if (stateRef.current.squirrels.length === 0) {
         spawnSquirrels(canvas.width, canvas.height, stateRef.current.level);
@@ -225,10 +240,20 @@ export default function BlackHoleGame() {
 
     const onDown = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
-      const pos =
-        "touches" in e ? getPos(e.touches[0]) : getPos(e as MouseEvent);
+      const isTouchEvent = "touches" in e;
+      const pos = isTouchEvent ? getPos(e.touches[0]) : getPos(e as MouseEvent);
       stateRef.current.pointer = pos;
       stateRef.current.pointerActive = true;
+      stateRef.current.isTouch = isTouchEvent;
+      if (isTouchEvent) {
+        stateRef.current.touchPulses.push({
+          x: pos.x,
+          y: pos.y,
+          age: 0,
+          maxAge: 30,
+        });
+        navigator.vibrate?.(15);
+      }
     };
     const onMove = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
@@ -248,6 +273,7 @@ export default function BlackHoleGame() {
     canvas.addEventListener("touchstart", onDown, { passive: false });
     canvas.addEventListener("touchmove", onMove, { passive: false });
     canvas.addEventListener("touchend", onUp);
+    canvas.addEventListener("touchcancel", onUp);
 
     function updateTailPhysics(sq: Squirrel, dt: number) {
       const segs = sq.tail;
@@ -383,6 +409,7 @@ export default function BlackHoleGame() {
         if (s.collapseProgress >= 1) {
           s.phase = "blackhole";
           setPhase("blackhole");
+          navigator.vibrate?.([50, 30, 80, 30, 120]);
           s.blackHoleRadius = 15;
           s.blackHoleAge = 0;
           s.emissionTimer = 0;
@@ -489,32 +516,41 @@ export default function BlackHoleGame() {
         if (s.pointerActive && s.pointer) {
           s.vortexPulse += 0.08 * dt;
           const pulse = 1 + 0.12 * Math.sin(s.vortexPulse);
+          const mobileBoost = s.isTouch ? 1.4 : 1;
+          const effectiveRadius = cfg.gravityRadius * pulse * mobileBoost;
           const grd = ctx.createRadialGradient(
             s.pointer.x,
             s.pointer.y,
             0,
             s.pointer.x,
             s.pointer.y,
-            cfg.gravityRadius * pulse
+            effectiveRadius
           );
-          grd.addColorStop(0, "rgba(168,85,247,0.35)");
-          grd.addColorStop(0.4, "rgba(124,58,237,0.15)");
+          grd.addColorStop(0, "rgba(168,85,247,0.45)");
+          grd.addColorStop(0.4, "rgba(124,58,237,0.2)");
           grd.addColorStop(1, "rgba(0,0,0,0)");
           ctx.fillStyle = grd;
           ctx.beginPath();
           ctx.arc(
             s.pointer.x,
             s.pointer.y,
-            cfg.gravityRadius * pulse,
+            effectiveRadius,
             0,
             Math.PI * 2
           );
           ctx.fill();
 
-          ctx.strokeStyle = `rgba(168,85,247,${0.3 + 0.2 * Math.sin(s.vortexPulse)})`;
-          ctx.lineWidth = 1.5;
+          const ringScale = s.isTouch ? 1.5 : 1;
+          ctx.strokeStyle = `rgba(168,85,247,${0.4 + 0.2 * Math.sin(s.vortexPulse)})`;
+          ctx.lineWidth = s.isTouch ? 2.5 : 1.5;
           ctx.beginPath();
-          ctx.arc(s.pointer.x, s.pointer.y, 40, 0, Math.PI * 2);
+          ctx.arc(s.pointer.x, s.pointer.y, 40 * ringScale, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.strokeStyle = `rgba(236,72,153,${0.2 + 0.15 * Math.sin(s.vortexPulse * 1.3)})`;
+          ctx.lineWidth = s.isTouch ? 1.5 : 1;
+          ctx.beginPath();
+          ctx.arc(s.pointer.x, s.pointer.y, 55 * ringScale, 0, Math.PI * 2);
           ctx.stroke();
         }
 
@@ -527,13 +563,15 @@ export default function BlackHoleGame() {
             const dx = s.pointer.x - sq.x;
             const dy = s.pointer.y - sq.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
+            const mobileBoost = s.isTouch ? 1.4 : 1;
+            const effectiveGravityRadius = cfg.gravityRadius * mobileBoost;
 
             if (cfg.fleeRadius > 0 && dist < cfg.fleeRadius) {
               const flee = (1 - dist / cfg.fleeRadius) * cfg.fleeForce;
               sq.vx -= (dx / dist) * flee * dt;
               sq.vy -= (dy / dist) * flee * dt;
-            } else if (dist < cfg.gravityRadius && dist > 1) {
-              const force = (1 - dist / cfg.gravityRadius) * 0.5;
+            } else if (dist < effectiveGravityRadius && dist > 1) {
+              const force = (1 - dist / effectiveGravityRadius) * 0.5;
               sq.vx += (dx / dist) * force * dt;
               sq.vy += (dy / dist) * force * dt;
               sq.inWell = true;
@@ -620,6 +658,20 @@ export default function BlackHoleGame() {
 
       // ── PARTICLES ────────────────────────────────────────────
       renderParticles(ctx, s, dt);
+
+      // ── TOUCH PULSES ────────────────────────────────────────
+      s.touchPulses = s.touchPulses.filter((p) => p.age < p.maxAge);
+      for (const p of s.touchPulses) {
+        p.age += dt;
+        const progress = p.age / p.maxAge;
+        const radius = 10 + progress * 50;
+        const alpha = (1 - progress) * 0.6;
+        ctx.strokeStyle = `rgba(168,85,247,${alpha})`;
+        ctx.lineWidth = 2 * (1 - progress);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
 
       // ── BLACK HOLE ───────────────────────────────────────────
       if (s.phase === "blackhole") {
@@ -823,6 +875,7 @@ export default function BlackHoleGame() {
             s.level += 1;
             s.phase = "transition";
             setPhase("transition");
+            navigator.vibrate?.([30, 20, 30, 20, 60]);
           }
         }
       }
@@ -969,17 +1022,32 @@ export default function BlackHoleGame() {
       canvas.removeEventListener("touchstart", onDown);
       canvas.removeEventListener("touchmove", onMove);
       canvas.removeEventListener("touchend", onUp);
+      canvas.removeEventListener("touchcancel", onUp);
     };
   }, [spawnSquirrels, spawnStars]);
 
   const cfg = getLevelConfig(level);
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-black select-none touch-none">
+    <div
+      className="relative overflow-hidden bg-black select-none"
+      style={{
+        touchAction: "none",
+        width: "100vw",
+        height: "100dvh",
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
+      }}
+    >
       <canvas ref={canvasRef} className="absolute inset-0" />
 
       {/* HUD */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none">
+      <div
+        className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none"
+        style={{ top: "calc(env(safe-area-inset-top, 0px) + 1rem)" }}
+      >
         <div className="text-white/60 text-xs font-mono tracking-widest uppercase">
           Squirrel Singularity ·{" "}
           <span className="text-purple-400">Level {level}</span>
@@ -1015,7 +1083,10 @@ export default function BlackHoleGame() {
 
       {/* Bottom hints */}
       {phase === "playing" && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-white/30 text-xs font-mono text-center pointer-events-none">
+        <div
+          className="absolute left-1/2 -translate-x-1/2 text-white/30 text-xs font-mono text-center pointer-events-none"
+          style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)" }}
+        >
           {level >= 2
             ? `Hold to pull · squirrels flee above level 2 · pull ${ENTANGLE_THRESHOLD} into the well`
             : `Press & hold to pull squirrels in · gather ${ENTANGLE_THRESHOLD} in the well to create a black hole`}
@@ -1023,18 +1094,24 @@ export default function BlackHoleGame() {
       )}
 
       {phase === "collapsing" && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-purple-300/80 text-sm font-mono text-center pointer-events-none animate-pulse">
+        <div
+          className="absolute left-1/2 -translate-x-1/2 text-purple-300/80 text-sm font-mono text-center pointer-events-none animate-pulse"
+          style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)" }}
+        >
           Singularity forming…
         </div>
       )}
 
       {phase === "blackhole" && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none">
+        <div
+          className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none"
+          style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)" }}
+        >
           <div className="text-yellow-300/90 text-sm font-mono tracking-widest animate-pulse">
             BLACK HOLE ACHIEVED
           </div>
           <div className="text-white/40 text-xs font-mono">
-            Click the black hole to advance to the next level
+            Tap the black hole to advance to the next level
           </div>
         </div>
       )}
