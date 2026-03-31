@@ -97,8 +97,13 @@ export default function BlackHoleGame() {
     lastCatchTime: 0,
     highScore: 0,
     scorePopups: [] as ScorePopup[],
+    shakeIntensity: 0,
+    shakeDecay: 0,
+    whiteFlashAlpha: 0,
+    collapseShakeTimer: 0,
   });
   const rafRef = useRef<number>(0);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>("playing");
   const [level, setLevel] = useState(1);
   const [inWellCount, setInWellCount] = useState(0);
@@ -189,6 +194,18 @@ export default function BlackHoleGame() {
       life: 1,
       maxLife: 1,
     });
+  };
+
+  const triggerShake = (intensity: number, decay: number) => {
+    stateRef.current.shakeIntensity = Math.max(
+      stateRef.current.shakeIntensity,
+      intensity
+    );
+    stateRef.current.shakeDecay = decay;
+  };
+
+  const triggerWhiteFlash = (alpha: number = 0.7) => {
+    stateRef.current.whiteFlashAlpha = alpha;
   };
 
   const saveHighScore = () => {
@@ -353,6 +370,38 @@ export default function BlackHoleGame() {
       const cy = h / 2;
       const cfg = getLevelConfig(s.level);
 
+      // ── SHAKE UPDATE ──────────────────────────────────────────
+      let shakeX = 0;
+      let shakeY = 0;
+      if (s.shakeIntensity > 0.1) {
+        shakeX = (Math.random() - 0.5) * s.shakeIntensity * 2;
+        shakeY = (Math.random() - 0.5) * s.shakeIntensity * 2;
+        s.shakeIntensity *= s.shakeDecay;
+      } else {
+        s.shakeIntensity = 0;
+      }
+      if (containerRef.current) {
+        containerRef.current.style.transform =
+          shakeX !== 0 || shakeY !== 0
+            ? `translate(${shakeX}px, ${shakeY}px)`
+            : "";
+      }
+
+      // ── WHITE FLASH DECAY ─────────────────────────────────────
+      if (s.whiteFlashAlpha > 0) {
+        s.whiteFlashAlpha *= 0.85;
+        if (s.whiteFlashAlpha < 0.01) s.whiteFlashAlpha = 0;
+      }
+
+      // ── COLLAPSE SHAKE ────────────────────────────────────────
+      if (s.phase === "collapsing") {
+        s.collapseShakeTimer += dt;
+        if (s.collapseShakeTimer > 8) {
+          s.collapseShakeTimer = 0;
+          triggerShake(2, 0.92);
+        }
+      }
+
       // ── COLLAPSING PHASE ──────────────────────────────────────
       if (s.phase === "collapsing") {
         s.collapseProgress += 0.012 * dt;
@@ -410,6 +459,8 @@ export default function BlackHoleGame() {
           s.phase = "blackhole";
           setPhase("blackhole");
           navigator.vibrate?.([50, 30, 80, 30, 120]);
+          triggerShake(14, 0.94);
+          triggerWhiteFlash(0.85);
           s.blackHoleRadius = 15;
           s.blackHoleAge = 0;
           s.emissionTimer = 0;
@@ -424,18 +475,18 @@ export default function BlackHoleGame() {
           setCombo(0);
           saveHighScore();
           spawnScorePopup(s.collapseCenterX, s.collapseCenterY - 30, `+${bonus} BLACK HOLE!`);
-          for (let i = 0; i < 40; i++) {
+          for (let i = 0; i < 80; i++) {
             const pa = Math.random() * Math.PI * 2;
-            const ps = randomBetween(1, 5);
+            const ps = randomBetween(2, 9);
             s.particles.push({
-              x: s.collapseCenterX,
-              y: s.collapseCenterY,
+              x: s.collapseCenterX + randomBetween(-10, 10),
+              y: s.collapseCenterY + randomBetween(-10, 10),
               vx: Math.cos(pa) * ps,
               vy: Math.sin(pa) * ps,
               life: 1,
               maxLife: 1,
-              color: ["#a855f7", "#7c3aed", "#ec4899"][
-                Math.floor(Math.random() * 3)
+              color: ["#a855f7", "#7c3aed", "#ec4899", "#f59e0b", "#fff"][
+                Math.floor(Math.random() * 5)
               ],
             });
           }
@@ -578,6 +629,7 @@ export default function BlackHoleGame() {
               currentInWell++;
 
               if (!wasInWell) {
+                triggerShake(3, 0.88);
                 if (now - s.lastCatchTime < 2000) {
                   s.combo = s.combo + 1;
                 } else {
@@ -882,6 +934,14 @@ export default function BlackHoleGame() {
 
       updateAndRenderPopups(ctx, s, dt);
 
+      // ── WHITE FLASH OVERLAY ───────────────────────────────────
+      if (s.whiteFlashAlpha > 0) {
+        ctx.globalAlpha = s.whiteFlashAlpha;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, w, h);
+        ctx.globalAlpha = 1;
+      }
+
       rafRef.current = requestAnimationFrame(loop);
     };
 
@@ -914,10 +974,11 @@ export default function BlackHoleGame() {
         p.vx *= 0.92;
         p.vy *= 0.92;
         p.life -= 0.04 * dt;
+        const pSize = 3 + (1 - p.life) * 2;
         ctx.globalAlpha = Math.max(0, p.life);
         ctx.fillStyle = p.color;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, pSize, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.globalAlpha = 1;
@@ -1001,7 +1062,20 @@ export default function BlackHoleGame() {
         // Draw body (emoji)
         ctx.save();
         ctx.translate(sq.x, sq.y);
-        ctx.scale(sq.scale, sq.scale);
+
+        if (s.phase === "collapsing" && sq.inWell && s.collapseProgress > 0.1) {
+          const dx = s.collapseCenterX - sq.x;
+          const dy = s.collapseCenterY - sq.y;
+          const stretchAngle = Math.atan2(dy, dx);
+          const stretchFactor = 0.5 + s.collapseProgress * 1.2;
+          const squashFactor = Math.max(0.3, 1 / stretchFactor);
+          ctx.rotate(stretchAngle);
+          ctx.scale(sq.scale * stretchFactor, sq.scale * squashFactor);
+          ctx.rotate(-stretchAngle);
+        } else {
+          ctx.scale(sq.scale, sq.scale);
+        }
+
         ctx.font = "22px serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -1030,6 +1104,7 @@ export default function BlackHoleGame() {
 
   return (
     <div
+      ref={containerRef}
       className="relative overflow-hidden bg-black select-none"
       style={{
         touchAction: "none",
