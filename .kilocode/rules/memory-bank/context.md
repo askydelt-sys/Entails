@@ -20,6 +20,7 @@ A Next.js 16 game where players use a gravity well to pull squirrels together, e
 - [x] Level progression system with difficulty scaling
 - [x] Flee mechanic for level 2+ squirrels
 - [x] Splash title screen with cosmic/space theme, animated orbiting squirrels, skippable click-to-start
+- [x] Achievement toast notifications for 11 milestones (black holes, levels, squirrels caught, combos)
 
 ## Game Mechanics
 
@@ -58,3 +59,4 @@ A Next.js 16 game where players use a gravity well to pull squirrels together, e
 | Initial | Template created with base setup |
 | 2026-03-30 | Complete game rewrite: 2-body squirrel system, tail entanglement, collapse-to-blackhole mechanic, squirrel pair emission from black hole |
 | 2026-03-31 | Added splash title screen with cosmic theme, orbiting squirrels, click-to-start transition |
+| 2026-03-31 | Added achievement toast notification system: 11 milestones tracked, persisted in localStorage, slide-in toasts auto-dismiss after 3s |
