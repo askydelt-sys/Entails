@@ -64,6 +64,125 @@ interface TouchPulse {
   maxAge: number;
 }
 
+interface Achievement {
+  id: string;
+  icon: string;
+  title: string;
+  description: string;
+  check: (s: {
+    blackHolesCreated: number;
+    level: number;
+    totalSquirrelsCaught: number;
+    maxComboEver: number;
+  }) => boolean;
+}
+
+interface Toast {
+  id: string;
+  icon: string;
+  title: string;
+  description: string;
+}
+
+const ACHIEVEMENTS: Achievement[] = [
+  {
+    id: "first_bh",
+    icon: "\u{1F300}",
+    title: "First Singularity",
+    description: "Created your first black hole",
+    check: (s) => s.blackHolesCreated >= 1,
+  },
+  {
+    id: "five_bh",
+    icon: "\u{1F525}",
+    title: "Singularity Veteran",
+    description: "Created 5 black holes",
+    check: (s) => s.blackHolesCreated >= 5,
+  },
+  {
+    id: "level_3",
+    icon: "\u{2B50}",
+    title: "Rising Star",
+    description: "Reached level 3",
+    check: (s) => s.level >= 3,
+  },
+  {
+    id: "level_5",
+    icon: "\u{1F680}",
+    title: "Deep Space",
+    description: "Reached level 5",
+    check: (s) => s.level >= 5,
+  },
+  {
+    id: "level_10",
+    icon: "\u{1F31F}",
+    title: "Cosmic Master",
+    description: "Reached level 10",
+    check: (s) => s.level >= 10,
+  },
+  {
+    id: "catch_100",
+    icon: "\u{1F43B}",
+    title: "Squirrel Wrangler",
+    description: "Caught 100 squirrels total",
+    check: (s) => s.totalSquirrelsCaught >= 100,
+  },
+  {
+    id: "catch_500",
+    icon: "\u{1F3B5}",
+    title: "Squirrel Symphony",
+    description: "Caught 500 squirrels total",
+    check: (s) => s.totalSquirrelsCaught >= 500,
+  },
+  {
+    id: "catch_1000",
+    icon: "\u{1F451}",
+    title: "Squirrel Royalty",
+    description: "Caught 1000 squirrels total",
+    check: (s) => s.totalSquirrelsCaught >= 1000,
+  },
+  {
+    id: "combo_5",
+    icon: "\u{26A1}",
+    title: "Combo Chain",
+    description: "Achieved a 5x combo",
+    check: (s) => s.maxComboEver >= 5,
+  },
+  {
+    id: "combo_10",
+    icon: "\u{1F4A5}",
+    title: "Combo Fury",
+    description: "Achieved a 10x combo",
+    check: (s) => s.maxComboEver >= 10,
+  },
+  {
+    id: "combo_15",
+    icon: "\u{1F386}",
+    title: "Combo God",
+    description: "Achieved a 15x combo",
+    check: (s) => s.maxComboEver >= 15,
+  },
+];
+
+const ACHIEVEMENT_STORAGE_KEY = "squirrel-singularity-achievements";
+
+function loadUnlockedAchievements(): Set<string> {
+  try {
+    const raw = localStorage.getItem(ACHIEVEMENT_STORAGE_KEY);
+    if (raw) return new Set(JSON.parse(raw));
+  } catch {}
+  return new Set();
+}
+
+function saveUnlockedAchievements(unlocked: Set<string>) {
+  try {
+    localStorage.setItem(
+      ACHIEVEMENT_STORAGE_KEY,
+      JSON.stringify([...unlocked])
+    );
+  } catch {}
+}
+
 type Phase = "playing" | "collapsing" | "blackhole" | "transition";
 
 function randomBetween(a: number, b: number) {
@@ -97,6 +216,10 @@ export default function BlackHoleGame() {
     lastCatchTime: 0,
     highScore: 0,
     scorePopups: [] as ScorePopup[],
+    totalSquirrelsCaught: 0,
+    blackHolesCreated: 0,
+    maxComboEver: 0,
+    unlockedAchievements: new Set<string>(),
   });
   const rafRef = useRef<number>(0);
   const [phase, setPhase] = useState<Phase>("playing");
@@ -105,6 +228,7 @@ export default function BlackHoleGame() {
   const [score, setScore] = useState(0);
   const [combo, setCombo] = useState(0);
   const [highScore, setHighScore] = useState(0);
+  const [toasts, setToasts] = useState<Toast[]>([]);
 
   const spawnSquirrels = useCallback(
     (w: number, h: number, lvl: number, existing?: Squirrel[]) => {
@@ -202,6 +326,26 @@ export default function BlackHoleGame() {
     }
   };
 
+  const checkAndUnlockAchievements = () => {
+    const s = stateRef.current;
+    for (const a of ACHIEVEMENTS) {
+      if (!s.unlockedAchievements.has(a.id) && a.check(s)) {
+        s.unlockedAchievements.add(a.id);
+        saveUnlockedAchievements(s.unlockedAchievements);
+        const toast: Toast = {
+          id: `${a.id}-${Date.now()}`,
+          icon: a.icon,
+          title: a.title,
+          description: a.description,
+        };
+        setToasts((prev) => [...prev, toast]);
+        setTimeout(() => {
+          setToasts((prev) => prev.filter((t) => t.id !== toast.id));
+        }, 3000);
+      }
+    }
+  };
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -232,6 +376,8 @@ export default function BlackHoleGame() {
         setHighScore(stateRef.current.highScore);
       }
     } catch {}
+
+    stateRef.current.unlockedAchievements = loadUnlockedAchievements();
 
     const getPos = (e: MouseEvent | Touch): { x: number; y: number } => {
       const rect = canvas.getBoundingClientRect();
@@ -420,9 +566,11 @@ export default function BlackHoleGame() {
           const bonus = 500 * s.level;
           s.score += bonus;
           s.combo = 0;
+          s.blackHolesCreated++;
           setScore(s.score);
           setCombo(0);
           saveHighScore();
+          checkAndUnlockAchievements();
           spawnScorePopup(s.collapseCenterX, s.collapseCenterY - 30, `+${bonus} BLACK HOLE!`);
           for (let i = 0; i < 40; i++) {
             const pa = Math.random() * Math.PI * 2;
@@ -583,12 +731,17 @@ export default function BlackHoleGame() {
                 } else {
                   s.combo = 1;
                 }
+                s.totalSquirrelsCaught++;
+                if (s.combo > s.maxComboEver) {
+                  s.maxComboEver = s.combo;
+                }
                 s.lastCatchTime = now;
                 const points = 10 * s.combo;
                 s.score += points;
                 setScore(s.score);
                 setCombo(s.combo);
                 saveHighScore();
+                checkAndUnlockAchievements();
                 spawnScorePopup(
                   sq.x,
                   sq.y,
@@ -875,6 +1028,7 @@ export default function BlackHoleGame() {
             s.level += 1;
             s.phase = "transition";
             setPhase("transition");
+            checkAndUnlockAchievements();
             navigator.vibrate?.([30, 20, 30, 20, 60]);
           }
         }
@@ -1123,6 +1277,33 @@ export default function BlackHoleGame() {
           </div>
         </div>
       )}
+
+      {/* Achievement toasts */}
+      <div
+        className="absolute flex flex-col gap-2 pointer-events-none z-50"
+        style={{
+          top: "calc(env(safe-area-inset-top, 0px) + 1rem)",
+          right: "calc(env(safe-area-inset-right, 0px) + 1rem)",
+        }}
+      >
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className="animate-toast-in flex items-start gap-3 rounded-lg border border-purple-500/40 bg-purple-950/90 backdrop-blur-sm px-4 py-3 shadow-lg shadow-purple-500/20"
+            style={{ minWidth: 220, maxWidth: 300 }}
+          >
+            <span className="text-2xl shrink-0">{toast.icon}</span>
+            <div className="flex flex-col gap-0.5">
+              <span className="text-yellow-300 text-sm font-bold font-mono tracking-wide">
+                {toast.title}
+              </span>
+              <span className="text-purple-200/80 text-xs font-mono">
+                {toast.description}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
